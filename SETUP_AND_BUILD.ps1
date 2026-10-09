@@ -76,6 +76,7 @@ if ($CMakeText -notmatch [regex]::Escape($Marker)) {
 # FAST_TTS_17_VOICEBOX_TARGET
 if(WIN32)
     add_executable(fast-tts-voicebox WIN32 tools/fast-tts-voicebox.cpp)
+    target_compile_definitions(fast-tts-voicebox PRIVATE NOMINMAX)
     target_link_libraries(fast-tts-voicebox PRIVATE qwen-core winmm shell32)
     link_ggml_backends(fast-tts-voicebox)
 endif()
