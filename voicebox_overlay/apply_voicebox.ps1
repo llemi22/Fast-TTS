@@ -12,6 +12,27 @@ if (-not (Test-Path $srcDir)) {
     throw "src directory not found. This does not look like the qwen3-tts.cpp repo root."
 }
 
+# Materialize the large native Windows UI source from its compressed text payload.
+$packedVoicebox = Join-Path $kitRoot 'src\voicebox_win.cpp.gz.b64'
+$voiceboxSource = Join-Path $kitRoot 'src\voicebox_win.cpp'
+if (-not (Test-Path $packedVoicebox)) {
+    throw "Missing compressed VoiceBox UI payload: $packedVoicebox"
+}
+try {
+    $encoded = (Get-Content $packedVoicebox -Raw).Trim()
+    $compressedBytes = [Convert]::FromBase64String($encoded)
+    $input = [System.IO.MemoryStream]::new(,$compressedBytes)
+    $gzip = [System.IO.Compression.GzipStream]::new($input, [System.IO.Compression.CompressionMode]::Decompress)
+    $output = [System.IO.MemoryStream]::new()
+    $gzip.CopyTo($output)
+    $gzip.Dispose()
+    $input.Dispose()
+    [System.IO.File]::WriteAllBytes($voiceboxSource, $output.ToArray())
+    $output.Dispose()
+} catch {
+    throw "Failed to materialize voicebox_win.cpp: $($_.Exception.Message)"
+}
+
 $files = @(
     'voicebox_win.cpp',
     'tts_transformer_streaming.cpp',
@@ -19,7 +40,9 @@ $files = @(
     'qwen3_tts_streaming.cpp'
 )
 foreach ($file in $files) {
-    Copy-Item (Join-Path $kitRoot "src\$file") (Join-Path $srcDir $file) -Force
+    $from = Join-Path $kitRoot "src\$file"
+    if (-not (Test-Path $from)) { throw "Missing VoiceBox source file: $from" }
+    Copy-Item $from (Join-Path $srcDir $file) -Force
 }
 
 $python = Get-Command python -ErrorAction SilentlyContinue
