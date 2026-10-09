@@ -1,40 +1,122 @@
 # Fast TTS
 
-Fast TTS is a low-latency native Windows Qwen3-TTS VoiceBox focused on minimizing **Enter-to-first-audio** latency.
+Fast TTS is a native Windows low-latency front end for **Qwen3-TTS 1.7B Base** using the MIT-licensed [`ServeurpersoCom/qwentts.cpp`](https://github.com/ServeurpersoCom/qwentts.cpp) runtime.
 
-## What the full package contains
+The current build is designed around these existing GGUF files:
 
-The GitHub Release produced by this repository contains one file:
+- `qwen-talker-1.7b-base-Q8_0.gguf`
+- `qwen-tokenizer-12hz-Q8_0.gguf`
 
-`Fast_TTS_FULL_WITH_MODELS.zip`
+For the original machine this pair already lives at:
 
-That package includes:
+`C:\Users\lukel\Qwen3-TTS\models\Qwen3-TTS-GGUF-Q8_0`
 
-- the pinned `predict-woo/qwen3-tts.cpp` source tree
-- the pinned GGML source tree
-- Fast TTS streaming / cancellation / Windows playback modifications
-- Windows setup, build, and run scripts
-- `qwen3-tts-0.6b-q8_0.gguf`
-- `qwen3-tts-tokenizer-f16.gguf`
+`RUN_VOICEBOX.ps1` auto-detects that location, so the models are **not copied or downloaded again**.
 
-## Interaction
+## Why this backend
 
-- **Enter** — speak
-- **Shift+Enter** — newline
-- **Esc** — cancel generation and playback
-- model remains loaded between utterances
-- codec frames are streamed to the vocoder before the whole utterance finishes
-- overlapping vocoder windows reduce chunk-boundary artifacts
-- multiple Windows audio buffers are queued ahead for smoother playback
+`qwentts.cpp` natively supports the 1.7B model and stateful frame-by-frame streaming. Its streaming path emits the first audio callback after the first generated codec frame, then ramps chunk size while preserving persistent decoder state. Fast TTS sends those chunks directly to a persistent Windows `waveOut` device.
 
-## Source bundle
+## User experience
 
-`Fast_TTS_SOURCE_PACKAGE.zip` is the small editable Fast TTS source/overlay package. GitHub Actions expands it, integrates the exact pinned upstream runtime and GGML dependency, downloads the compatible Qwen3-TTS model files, and publishes the all-in-one Release ZIP.
+- model remains loaded for the entire app session
+- warmup runs once at startup
+- large native Windows text box
+- **Enter** speaks
+- **Shift+Enter** inserts a newline
+- **Esc** cancels current speech and clears queued speech
+- submitted text clears immediately so the next sentence can be typed while audio is playing
+- synthesis jobs queue FIFO
+- first-audio latency is shown in the status bar
+- no temporary WAV files in the normal streaming path
+- optional cached voice cloning from a reference WAV or precomputed `.spk` / `.rvq` files
 
-## Licensing
+## Build on the RTX 5080 Windows machine
 
-- `predict-woo/qwen3-tts.cpp`: MIT
-- Fast TTS modifications: MIT
-- Qwen3-TTS compatible model weights: Apache-2.0
+Requirements:
 
-The upstream runtime is pinned to commit `b3ba14077cf1b3e11b86e5f84aa9184605c89b28` for reproducibility.
+- Git
+- CMake
+- Visual Studio with the Desktop C++ workload
+- NVIDIA CUDA Toolkit **12.8 or newer recommended for RTX 50-series / Blackwell**
+
+From PowerShell in the Fast-TTS repository:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\SETUP_AND_BUILD.ps1
+```
+
+The setup script:
+
+1. clones `ServeurpersoCom/qwentts.cpp`
+2. pins it to commit `51512f129a7419567f4b8abfb06801451789b8f1`
+3. checks out its pinned GGML submodule
+4. adds the native Fast TTS VoiceBox target
+5. builds the CUDA executable
+
+The backend source is placed under `app\`; model files remain where they already are.
+
+## Verify the existing model pair
+
+```powershell
+.\PREPARE_MODELS.ps1
+```
+
+This does **not** download anything. It verifies the existing 1.7B model and tokenizer.
+
+## Run
+
+```powershell
+.\RUN_VOICEBOX.ps1
+```
+
+The runner automatically checks:
+
+1. `-ModelDir` if supplied
+2. `$env:FAST_TTS_MODEL_DIR`
+3. `%USERPROFILE%\Qwen3-TTS\models\Qwen3-TTS-GGUF-Q8_0`
+4. local `models\` folders
+
+You can override paths explicitly:
+
+```powershell
+.\RUN_VOICEBOX.ps1 `
+  -Model "D:\models\qwen-talker-1.7b-base-Q8_0.gguf" `
+  -Codec "D:\models\qwen-tokenizer-12hz-Q8_0.gguf"
+```
+
+## Voice cloning
+
+Reference WAV, extracted once when the app starts:
+
+```powershell
+.\RUN_VOICEBOX.ps1 -RefWav "C:\voices\reference.wav"
+```
+
+ICL cloning with a matching transcript:
+
+```powershell
+.\RUN_VOICEBOX.ps1 `
+  -RefWav "C:\voices\reference.wav" `
+  -RefText "C:\voices\reference.txt"
+```
+
+Precomputed `.spk` / `.rvq` latents are also accepted:
+
+```powershell
+.\RUN_VOICEBOX.ps1 `
+  -RefSpk "C:\voices\voice.spk" `
+  -RefRvq "C:\voices\voice.rvq" `
+  -RefText "C:\voices\voice.txt"
+```
+
+Using precomputed latents avoids re-running the speaker encoder / reference codec at each app startup.
+
+## Backend and licenses
+
+- Fast TTS code: MIT
+- `ServeurpersoCom/qwentts.cpp`: MIT
+- Qwen3-TTS model and tokenizer: Apache-2.0
+
+The 1.7B GGUF files are intentionally not committed to Git because they already exist locally and the pair is larger than a normal single GitHub source artifact.
