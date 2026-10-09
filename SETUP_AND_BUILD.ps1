@@ -1,15 +1,17 @@
 param(
     [string]$Config = 'Release',
     [switch]$Fresh,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$CpuOnly,
+    [string]$CudaArch = 'native'
 )
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $App = Join-Path $Root 'app'
-$Overlay = Join-Path $Root 'voicebox_overlay'
-$PinnedCommit = 'b3ba14077cf1b3e11b86e5f84aa9184605c89b28'
-$RepoUrl = 'https://github.com/predict-woo/qwen3-tts.cpp.git'
+$Overlay = Join-Path $Root 'voicebox_17'
+$PinnedCommit = '51512f129a7419567f4b8abfb06801451789b8f1'
+$RepoUrl = 'https://github.com/ServeurpersoCom/qwentts.cpp.git'
 
 function Require-Command([string]$Name, [string]$Hint) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
@@ -17,86 +19,124 @@ function Require-Command([string]$Name, [string]$Hint) {
     }
 }
 
-Require-Command git 'Install Git for Windows, then reopen PowerShell.'
-Require-Command cmake 'Install CMake or the C++ CMake tools from Visual Studio 2022.'
+function Get-VSGenerator {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path $vswhere)) { return $null }
 
-$python = Get-Command python -ErrorAction SilentlyContinue
-if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
-if (-not $python) { throw 'Python 3 is required for the one-time source integration step.' }
+    $version = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion
+    if (-not $version) { return $null }
+    $major = [int]($version.Split('.')[0])
+    if ($major -ge 18) { return 'Visual Studio 18 2026' }
+    if ($major -eq 17) { return 'Visual Studio 17 2022' }
+    return $null
+}
+
+Require-Command git 'Install Git for Windows and reopen PowerShell.'
+Require-Command cmake 'Install CMake and the Visual Studio C++ Desktop workload.'
 
 if ($Fresh -and (Test-Path $App)) {
-    Write-Host 'Removing existing app tree...' -ForegroundColor Yellow
+    Write-Host 'Removing existing integrated backend...' -ForegroundColor Yellow
     Remove-Item $App -Recurse -Force
 }
 
 if (-not (Test-Path (Join-Path $App '.git'))) {
     if (Test-Path $App) {
         $items = Get-ChildItem $App -Force -ErrorAction SilentlyContinue
-        if ($items) { throw "The app folder exists but is not the managed Git checkout: $App. Use -Fresh if it is disposable." }
+        if ($items) {
+            throw "The app folder exists but is not the managed Git checkout: $App. Re-run with -Fresh if it is disposable."
+        }
         Remove-Item $App -Force -ErrorAction SilentlyContinue
     }
-    Write-Host 'Fetching pinned qwen3-tts.cpp source...' -ForegroundColor Cyan
+    Write-Host 'Fetching qwentts.cpp 1.7B backend...' -ForegroundColor Cyan
     git clone $RepoUrl $App
-    if ($LASTEXITCODE -ne 0) { throw 'Git clone failed.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Backend clone failed.' }
 }
 
-Write-Host "Checking out pinned upstream commit $PinnedCommit..." -ForegroundColor Cyan
+Write-Host "Checking out pinned qwentts.cpp commit $PinnedCommit..." -ForegroundColor Cyan
 git -C $App fetch origin $PinnedCommit --depth 1
-if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the pinned upstream commit.' }
+if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the pinned backend commit.' }
 git -C $App checkout --detach $PinnedCommit
-if ($LASTEXITCODE -ne 0) { throw 'Could not checkout the pinned upstream commit.' }
+if ($LASTEXITCODE -ne 0) { throw 'Could not checkout the pinned backend commit.' }
 
-Write-Host 'Fetching the pinned GGML submodule...' -ForegroundColor Cyan
+Write-Host 'Fetching pinned GGML submodule...' -ForegroundColor Cyan
 git -C $App submodule sync --recursive
 git -C $App submodule update --init --recursive
 if ($LASTEXITCODE -ne 0) { throw 'GGML submodule setup failed.' }
 
-Write-Host 'Integrating VoiceBox streaming source...' -ForegroundColor Cyan
-Push-Location $App
-try {
-    & (Join-Path $Overlay 'apply_voicebox.ps1')
-    if ($LASTEXITCODE -ne 0) { throw 'VoiceBox source integration failed.' }
-} finally {
-    Pop-Location
+$VoiceboxSource = Join-Path $Overlay 'fast_tts_voicebox.cpp'
+if (-not (Test-Path $VoiceboxSource)) { throw "Missing Fast TTS source: $VoiceboxSource" }
+Copy-Item $VoiceboxSource (Join-Path $App 'tools\fast-tts-voicebox.cpp') -Force
+
+$CMake = Join-Path $App 'CMakeLists.txt'
+$Marker = '# FAST_TTS_17_VOICEBOX_TARGET'
+$CMakeText = Get-Content $CMake -Raw
+if ($CMakeText -notmatch [regex]::Escape($Marker)) {
+    $Block = @'
+
+# FAST_TTS_17_VOICEBOX_TARGET
+if(WIN32)
+    add_executable(fast-tts-voicebox WIN32 tools/fast-tts-voicebox.cpp)
+    target_link_libraries(fast-tts-voicebox PRIVATE qwen-core winmm shell32)
+    link_ggml_backends(fast-tts-voicebox)
+endif()
+'@
+    Add-Content -Path $CMake -Value $Block -Encoding UTF8
 }
 
-$stamp = @"
-Qwen3-TTS VoiceBox integrated source
-Upstream: predict-woo/qwen3-tts.cpp
-Upstream commit: $PinnedCommit
-VoiceBox overlay: low-TTFA incremental codec-frame streaming
+$Stamp = @"
+Fast TTS 1.7B integrated source
+Backend: ServeurpersoCom/qwentts.cpp
+Backend commit: $PinnedCommit
+Model target: qwen-talker-1.7b-base-Q8_0.gguf
+Codec target: qwen-tokenizer-12hz-Q8_0.gguf
+Streaming: qwentts.cpp native stateful frame streaming
 Generated: $(Get-Date -Format o)
 "@
-Set-Content -Path (Join-Path $App 'VOICEBOX_INTEGRATED_SOURCE.txt') -Value $stamp -Encoding UTF8
+Set-Content -Path (Join-Path $App 'FAST_TTS_INTEGRATED_SOURCE.txt') -Value $Stamp -Encoding UTF8
 
 if ($SkipBuild) {
-    Write-Host "Integrated source is ready at: $App" -ForegroundColor Green
+    Write-Host "Integrated 1.7B source is ready at: $App" -ForegroundColor Green
     exit 0
 }
 
-Write-Host 'Building CUDA VoiceBox...' -ForegroundColor Cyan
-Push-Location $App
-try {
-    & (Join-Path $Overlay 'build_voicebox.ps1') -Config $Config
-    if ($LASTEXITCODE -ne 0) { throw 'VoiceBox build failed.' }
-} finally {
-    Pop-Location
+$Build = Join-Path $App 'build-fast'
+if (Test-Path $Build) { Remove-Item $Build -Recurse -Force }
+
+$Gen = Get-VSGenerator
+$Configure = @('-S', $App, '-B', $Build)
+if ($Gen) { $Configure += @('-G', $Gen, '-A', 'x64') }
+
+if ($CpuOnly) {
+    $Configure += '-DGGML_CUDA=OFF'
+    Write-Host 'Configuring CPU validation build...' -ForegroundColor Cyan
+} else {
+    if (-not (Get-Command nvcc -ErrorAction SilentlyContinue)) {
+        Write-Host 'nvcc was not found on PATH. CMake may still find CUDA through Visual Studio, but CUDA Toolkit 12.8+ is recommended for RTX 50-series.' -ForegroundColor Yellow
+    }
+    $Configure += '-DGGML_CUDA=ON'
+    if ($CudaArch) { $Configure += "-DCMAKE_CUDA_ARCHITECTURES=$CudaArch" }
+    Write-Host 'Configuring CUDA build for Fast TTS...' -ForegroundColor Cyan
 }
 
-$exeCandidates = @(
-    (Join-Path $App "build\$Config\qwen3-tts-voicebox.exe"),
-    (Join-Path $App 'build\qwen3-tts-voicebox.exe')
+cmake @Configure
+if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed.' }
+
+cmake --build $Build --config $Config --target fast-tts-voicebox --parallel
+if ($LASTEXITCODE -ne 0) { throw 'Fast TTS build failed.' }
+
+$ExeCandidates = @(
+    (Join-Path $Build "$Config\fast-tts-voicebox.exe"),
+    (Join-Path $Build 'fast-tts-voicebox.exe')
 )
-$Exe = $exeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-if ($Exe) {
-    $ExeDir = Split-Path -Parent $Exe
-    Get-ChildItem (Join-Path $App 'ggml\build') -Recurse -Filter 'ggml*.dll' -ErrorAction SilentlyContinue |
-        ForEach-Object { Copy-Item $_.FullName $ExeDir -Force }
-    Write-Host ''
-    Write-Host 'READY.' -ForegroundColor Green
-    Write-Host "Integrated source: $App" -ForegroundColor Green
-    Write-Host "Executable:       $Exe" -ForegroundColor Green
-    Write-Host 'Next: put/prepare the model GGUFs, then run RUN_VOICEBOX.ps1.' -ForegroundColor Cyan
-} else {
-    Write-Host "Integrated source is ready at $App, but the expected EXE was not found after the build." -ForegroundColor Yellow
+$Exe = $ExeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $Exe) {
+    $Exe = Get-ChildItem $Build -Recurse -Filter 'fast-tts-voicebox.exe' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+}
+if (-not $Exe) { throw 'Build completed but fast-tts-voicebox.exe was not found.' }
+
+Write-Host ''
+Write-Host 'FAST TTS 1.7B BUILD READY.' -ForegroundColor Green
+Write-Host "Executable: $Exe" -ForegroundColor Green
+if (-not $CpuOnly) {
+    Write-Host 'Next: run .\RUN_VOICEBOX.ps1. It auto-detects your existing Qwen3-TTS model folder.' -ForegroundColor Cyan
 }
