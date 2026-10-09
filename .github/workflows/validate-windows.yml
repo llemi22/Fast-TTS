@@ -1,0 +1,40 @@
+name: Validate Windows VoiceBox
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'SETUP_AND_BUILD.ps1'
+      - 'RUN_VOICEBOX.ps1'
+      - 'PREPARE_MODELS.ps1'
+      - 'voicebox_17/**'
+      - '.github/workflows/validate-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fast-tts-windows-validation
+  cancel-in-progress: true
+
+jobs:
+  windows-cpu-compile:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout Fast TTS
+        uses: actions/checkout@v4
+
+      - name: Build native VoiceBox against pinned qwentts.cpp
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process Bypass -Force
+          .\SETUP_AND_BUILD.ps1 -Fresh -CpuOnly
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem .\app\build-fast -Recurse -Filter fast-tts-voicebox.exe | Select-Object -First 1
+          if (-not $exe) { throw 'fast-tts-voicebox.exe was not produced.' }
+          Write-Host "Validated: $($exe.FullName)"
