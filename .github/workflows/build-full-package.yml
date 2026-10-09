@@ -1,4 +1,4 @@
-name: Build full Fast TTS package
+name: Package Fast TTS 1.7B source
 
 on:
   workflow_dispatch:
@@ -14,5 +14,56 @@ permissions:
 jobs:
   package:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
-      - run: echo "Manual release workflow temporarily parked during the 1.7B backend migration."
+      - name: Checkout Fast TTS
+        uses: actions/checkout@v4
+
+      - name: Integrate pinned 1.7B backend source
+        shell: pwsh
+        run: |
+          .\SETUP_AND_BUILD.ps1 -Fresh -SkipBuild
+          if (!(Test-Path 'app/FAST_TTS_INTEGRATED_SOURCE.txt')) { throw 'Integrated source was not produced.' }
+          if (Test-Path 'app/.git') { Remove-Item 'app/.git' -Recurse -Force }
+          if (Test-Path 'app/ggml/.git') { Remove-Item 'app/ggml/.git' -Recurse -Force }
+
+      - name: Create source package
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'Fast_TTS_1_7B_SOURCE'
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Get-ChildItem -Force | Where-Object { $_.Name -ne '.git' } | ForEach-Object {
+            Copy-Item $_.FullName $stage -Recurse -Force
+          }
+          @"
+          Fast TTS 1.7B source package
+
+          Backend: ServeurpersoCom/qwentts.cpp (MIT)
+          Backend commit: 51512f129a7419567f4b8abfb06801451789b8f1
+          Models expected locally:
+          - qwen-talker-1.7b-base-Q8_0.gguf
+          - qwen-tokenizer-12hz-Q8_0.gguf
+
+          Model files are not bundled because the existing local pair is reused directly.
+          "@ | Set-Content (Join-Path $stage 'PACKAGE_NOTES.txt') -Encoding UTF8
+          $zip = Join-Path $PWD 'Fast_TTS_1_7B_SOURCE.zip'
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          & 7z a -tzip -mx=5 $zip "$stage\*"
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  Fast_TTS_1_7B_SOURCE.zip" | Set-Content SHA256SUMS.txt -Encoding ASCII
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || 'v0.2.0' }}
+        run: |
+          $notes = 'Fast TTS 1.7B native Windows source package using qwentts.cpp. Models are reused from the local Qwen3-TTS installation and are not duplicated in the release.'
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:TAG Fast_TTS_1_7B_SOURCE.zip SHA256SUMS.txt --clobber
+          } else {
+            gh release create $env:TAG Fast_TTS_1_7B_SOURCE.zip SHA256SUMS.txt --title "Fast TTS $env:TAG" --notes $notes
+          }
