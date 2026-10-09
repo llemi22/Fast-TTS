@@ -2,6 +2,7 @@ param(
     [string]$Model = '',
     [string]$Codec = '',
     [string]$ModelDir = '',
+    [string]$VoiceDir = '',
     [string]$Lang = 'English',
     [string]$RefWav = '',
     [string]$RefText = '',
@@ -67,9 +68,19 @@ if (-not $Codec -or -not (Test-Path $Codec)) {
     throw "12Hz tokenizer model not found. Expected qwen-tokenizer-12hz-Q8_0.gguf. Checked: $($CandidateDirs -join '; ')"
 }
 
+if (-not $VoiceDir) {
+    $defaultVoiceDir = Join-Path $env:USERPROFILE 'Qwen3-TTS\maintained-server-data\voices-q8'
+    if (Test-Path (Join-Path $defaultVoiceDir 'migration-manifest.json')) {
+        $VoiceDir = $defaultVoiceDir
+    }
+}
+
 Write-Host 'Using existing local models:' -ForegroundColor Green
 Write-Host "  Talker:    $Model"
 Write-Host "  Tokenizer: $Codec"
+if ($VoiceDir) {
+    Write-Host "  Voices:    $VoiceDir"
+}
 Write-Host ''
 
 $Args = @(
@@ -78,6 +89,7 @@ $Args = @(
     '--lang', $Lang,
     '--max-tokens', "$MaxTokens"
 )
+if ($VoiceDir) { $Args += @('--voice-dir', $VoiceDir) }
 if ($Temperature -ge 0) { $Args += @('--temperature', "$Temperature") }
 if ($TopK -ge 0) { $Args += @('--top-k', "$TopK") }
 if ($Seed -ne -2) { $Args += @('--seed', "$Seed") }
