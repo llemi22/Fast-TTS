@@ -1,0 +1,13 @@
+# Local build/output
+app/
+build/
+models/
+*.gguf
+*.wav
+*.zip
+
+# IDE / OS
+.vs/
+.vscode/
+.DS_Store
+Thumbs.db
