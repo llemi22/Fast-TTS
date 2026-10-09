@@ -20,8 +20,8 @@ if (-not (Test-Path $packedVoicebox)) {
 }
 try {
     $encoded = (Get-Content $packedVoicebox -Raw).Trim()
-    $compressedBytes = [Convert]::FromBase64String($encoded)
-    $input = [System.IO.MemoryStream]::new(,$compressedBytes)
+    [byte[]]$compressedBytes = [Convert]::FromBase64String($encoded)
+    $input = [System.IO.MemoryStream]::new($compressedBytes)
     $gzip = [System.IO.Compression.GzipStream]::new($input, [System.IO.Compression.CompressionMode]::Decompress)
     $output = [System.IO.MemoryStream]::new()
     $gzip.CopyTo($output)
