@@ -305,7 +305,7 @@ def run_live(args: argparse.Namespace) -> int:
     sample_rate = args.sample_rate
     if args.warmup_ms > 0:
         warmup_samples = max(1, int(sample_rate * args.warmup_ms / 1000))
-        print(f"Warming Whisper CUDA path with {args.warmup_ms} ms of audio...", flush=True)
+        print(f"Warming Whisper inference path with {args.warmup_ms} ms of audio...", flush=True)
         warm_started = time.perf_counter()
         _transcribe_words(
             model,
@@ -406,7 +406,10 @@ def run_live(args: argparse.Namespace) -> int:
     ):
         try:
             while True:
-                block = audio_q.get(timeout=1.0)
+                try:
+                    block = audio_q.get(timeout=1.0)
+                except queue.Empty:
+                    continue
                 speech = _dbfs(block) >= args.speech_threshold_db
                 now = time.monotonic()
 
@@ -459,9 +462,6 @@ def run_live(args: argparse.Namespace) -> int:
                                 max(1, int(trim_to * sample_rate)),
                             )
                             audio_trim_left(trim_samples)
-                            # Re-evaluate the new uncommitted head as soon as enough
-                            # fresh audio exists instead of waiting a full cadence.
-                            last_decode_started = 0.0
                     chunker.maybe_emit()
 
                 endpoint = silence_ms >= args.endpoint_ms
