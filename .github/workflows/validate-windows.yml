@@ -77,6 +77,16 @@ jobs:
       - name: Validate live speech bridge
         shell: pwsh
         run: |
+          foreach ($script in @('.\RUN_VOICEBOX.ps1', '.\SETUP_LIVE_SPEECH.ps1', '.\RUN_LIVE_SPEECH.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $message = ($errors | ForEach-Object { $_.Message }) -join '; '
+              throw "PowerShell parse failed for ${script}: $message"
+            }
+          }
+
           python -m py_compile .\live_speech\live_stt_tts.py
           if ($LASTEXITCODE -ne 0) { throw 'Live speech Python syntax validation failed.' }
           python .\live_speech\live_stt_tts.py --self-test
