@@ -13,7 +13,8 @@ param(
     [int]$TopK = -1,
     [Int64]$Seed = -2,
     [switch]$NoWarmup,
-    [switch]$NoFA
+    [switch]$NoFA,
+    [switch]$Detached
 )
 
 $ErrorActionPreference = 'Stop'
@@ -100,7 +101,23 @@ if ($RefRvq) { $Args += @('--ref-rvq', $RefRvq) }
 if ($NoWarmup) { $Args += '--no-warmup' }
 if ($NoFA) { $Args += '--no-fa' }
 
-Push-Location (Split-Path -Parent $Exe)
+$WorkingDir = Split-Path -Parent $Exe
+
+if ($Detached) {
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $Exe
+    $psi.WorkingDirectory = $WorkingDir
+    $psi.UseShellExecute = $false
+    foreach ($arg in $Args) {
+        [void]$psi.ArgumentList.Add([string]$arg)
+    }
+    $process = [System.Diagnostics.Process]::Start($psi)
+    if (-not $process) { throw 'Fast TTS VoiceBox failed to start.' }
+    Write-Host "Fast TTS VoiceBox started (PID $($process.Id))." -ForegroundColor Green
+    return
+}
+
+Push-Location $WorkingDir
 try {
     & $Exe @Args
 } finally {
