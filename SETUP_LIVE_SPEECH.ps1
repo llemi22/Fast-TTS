@@ -18,35 +18,32 @@ function Resolve-Python {
         if (-not (Get-Command $Explicit -ErrorAction SilentlyContinue)) {
             throw "Python command not found: $Explicit"
         }
-        return @($Explicit)
+        return [pscustomobject]@{ Exe = $Explicit; Args = @() }
     }
 
     if (Get-Command py -ErrorAction SilentlyContinue) {
         foreach ($version in @('3.12', '3.11', '3.10')) {
             & py "-$version" -c "import sys; print(sys.executable)" *> $null
             if ($LASTEXITCODE -eq 0) {
-                return @('py', "-$version")
+                return [pscustomobject]@{ Exe = 'py'; Args = @("-$version") }
             }
         }
         & py -3 -c "import sys; print(sys.executable)" *> $null
         if ($LASTEXITCODE -eq 0) {
-            return @('py', '-3')
+            return [pscustomobject]@{ Exe = 'py'; Args = @('-3') }
         }
     }
 
     if (Get-Command python -ErrorAction SilentlyContinue) {
-        return @('python')
+        return [pscustomobject]@{ Exe = 'python'; Args = @() }
     }
 
     throw 'Python 3.9+ is required for faster-whisper. Install Python and reopen PowerShell.'
 }
 
 $PythonCmd = Resolve-Python -Explicit $Python
-$Exe = $PythonCmd[0]
-$PrefixArgs = @()
-if ($PythonCmd.Count -gt 1) {
-    $PrefixArgs = $PythonCmd[1..($PythonCmd.Count - 1)]
-}
+$Exe = [string]$PythonCmd.Exe
+$PrefixArgs = @($PythonCmd.Args)
 
 Write-Host "Creating live speech environment at $Venv ..." -ForegroundColor Cyan
 & $Exe @PrefixArgs -m venv $Venv
