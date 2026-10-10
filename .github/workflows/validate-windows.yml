@@ -93,8 +93,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Live speech commit/chunker self-test failed.' }
 
           $runner = Get-Content '.\RUN_LIVE_SPEECH.ps1' -Raw
-          foreach ($needle in @('turbo', 'int8_float16', 'RUN_VOICEBOX.ps1', 'Detached')) {
+          foreach ($needle in @(
+            "WhisperModel = 'turbo'",
+            "ComputeType = 'float16'",
+            'StepMs = 240',
+            'MinDecodeMs = 360',
+            'EndpointMs = 320',
+            'TailWords = 1',
+            'MinChunkWords = 2',
+            'MaxChunkWords = 5',
+            'WarmupMs = 700',
+            'RUN_VOICEBOX.ps1',
+            'Detached'
+          )) {
             if (-not $runner.Contains($needle)) { throw "Missing live runner invariant: $needle" }
+          }
+
+          $bridge = Get-Content '.\live_speech\live_stt_tts.py' -Raw
+          foreach ($needle in @('latency="low"', 'last_decode_started', 'Whisper warmup complete')) {
+            if (-not $bridge.Contains($needle)) { throw "Missing live bridge latency invariant: $needle" }
           }
 
       - name: Build native VoiceBox against pinned qwentts.cpp

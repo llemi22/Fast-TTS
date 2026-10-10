@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import ctypes
 import math
-import os
 import queue
 import sys
 import time
@@ -303,6 +302,20 @@ def run_live(args: argparse.Namespace) -> int:
             "CTranslate2 CUDA/cuDNN runtime expected by its installed version."
         ) from exc
 
+    sample_rate = args.sample_rate
+    if args.warmup_ms > 0:
+        warmup_samples = max(1, int(sample_rate * args.warmup_ms / 1000))
+        print(f"Warming Whisper inference path with {args.warmup_ms} ms of audio...", flush=True)
+        warm_started = time.perf_counter()
+        _transcribe_words(
+            model,
+            np.zeros((warmup_samples,), dtype=np.float32),
+            args.language,
+            None,
+        )
+        warm_ms = (time.perf_counter() - warm_started) * 1000.0
+        print(f"Whisper warmup complete in {warm_ms:.0f} ms.", flush=True)
+
     chunker = Chunker(
         client=client,
         min_words=args.min_chunk_words,
@@ -311,7 +324,6 @@ def run_live(args: argparse.Namespace) -> int:
     )
     committer = StableWordCommitter(args.tail_words, chunker)
 
-    sample_rate = args.sample_rate
     block_ms = args.block_ms
     blocksize = max(1, int(sample_rate * block_ms / 1000))
     pre_roll_blocks = max(1, int(math.ceil(args.pre_roll_ms / block_ms)))
@@ -321,8 +333,44 @@ def run_live(args: argparse.Namespace) -> int:
     pre_roll: list = []
     active = False
     silence_ms = 0
-    audio = np.zeros((0,), dtype=np.float32)
-    last_decode = 0.0
+    audio_blocks: list = []
+    audio_samples = 0
+    last_decode_started = 0.0
+
+    def audio_clear() -> None:
+        nonlocal audio_blocks, audio_samples
+        audio_blocks = []
+        audio_samples = 0
+
+    def audio_extend(blocks) -> None:
+        nonlocal audio_samples
+        for item in blocks:
+            if item.size:
+                audio_blocks.append(item)
+                audio_samples += int(item.size)
+
+    def audio_append(block) -> None:
+        nonlocal audio_samples
+        if block.size:
+            audio_blocks.append(block)
+            audio_samples += int(block.size)
+
+    def audio_array():
+        if not audio_blocks:
+            return np.zeros((0,), dtype=np.float32)
+        if len(audio_blocks) == 1:
+            return audio_blocks[0]
+        return np.concatenate(audio_blocks).astype(np.float32, copy=False)
+
+    def audio_trim_left(samples: int) -> None:
+        nonlocal audio_blocks, audio_samples
+        samples = max(0, min(int(samples), audio_samples))
+        if samples <= 0:
+            return
+        flattened = audio_array()
+        remaining = flattened[samples:].copy()
+        audio_blocks = [remaining] if remaining.size else []
+        audio_samples = int(remaining.size)
 
     def callback(indata, frames, time_info, status) -> None:
         del frames, time_info
@@ -342,8 +390,8 @@ def run_live(args: argparse.Namespace) -> int:
                 pass
 
     print(
-        "Live mode ready. Speak into the microphone. "
-        "Use headphones to keep the cloned output out of the mic. Ctrl+C stops.",
+        "Live mode ready. Speak into the microphone. Ctrl+C stops. "
+        f"ASR={args.step_ms} ms cadence, tail={args.tail_words}, chunks={args.min_chunk_words}-{args.max_chunk_words} words.",
         flush=True,
     )
 
@@ -353,11 +401,15 @@ def run_live(args: argparse.Namespace) -> int:
         channels=1,
         dtype="float32",
         device=input_device,
+        latency="low",
         callback=callback,
     ):
         try:
             while True:
-                block = audio_q.get(timeout=1.0)
+                try:
+                    block = audio_q.get(timeout=1.0)
+                except queue.Empty:
+                    continue
                 speech = _dbfs(block) >= args.speech_threshold_db
                 now = time.monotonic()
 
@@ -371,13 +423,14 @@ def run_live(args: argparse.Namespace) -> int:
 
                     active = True
                     silence_ms = 0
-                    audio = np.concatenate(pre_roll).astype(np.float32, copy=False)
+                    audio_clear()
+                    audio_extend(pre_roll)
                     pre_roll = []
-                    last_decode = 0.0
+                    last_decode_started = 0.0
                     committer.reset()
                     print("[mic] speech started", flush=True)
                 else:
-                    audio = np.concatenate((audio, block))
+                    audio_append(block)
 
                 if speech:
                     silence_ms = 0
@@ -385,47 +438,52 @@ def run_live(args: argparse.Namespace) -> int:
                     silence_ms += block_ms
 
                 should_decode = (
-                    audio.size >= int(sample_rate * args.min_decode_ms / 1000)
-                    and (now - last_decode) * 1000.0 >= args.step_ms
+                    audio_samples >= int(sample_rate * args.min_decode_ms / 1000)
+                    and (now - last_decode_started) * 1000.0 >= args.step_ms
                 )
 
-                current_words: list[Word] = []
                 if should_decode:
+                    decode_started = time.monotonic()
+                    last_decode_started = decode_started
+                    current_audio = audio_array()
                     current_words = _transcribe_words(
-                        model, audio, args.language, chunker.prompt()
+                        model, current_audio, args.language, chunker.prompt()
                     )
-                    last_decode = time.monotonic()
+                    decode_ms = (time.monotonic() - decode_started) * 1000.0
                     if current_words:
                         print(
-                            "[stt] " + _join_words([w.text for w in current_words]),
+                            f"[stt {decode_ms:.0f} ms] " + _join_words([w.text for w in current_words]),
                             flush=True,
                         )
                         trim_to = committer.observe(current_words)
                         if trim_to > 0:
                             trim_samples = min(
-                                audio.size,
+                                audio_samples,
                                 max(1, int(trim_to * sample_rate)),
                             )
-                            audio = audio[trim_samples:].copy()
-                            last_decode = 0.0
+                            audio_trim_left(trim_samples)
                     chunker.maybe_emit()
 
                 endpoint = silence_ms >= args.endpoint_ms
-                safety_flush = audio.size >= int(sample_rate * args.max_uncommitted_seconds)
+                safety_flush = audio_samples >= int(sample_rate * args.max_uncommitted_seconds)
 
                 if endpoint or safety_flush:
-                    final_words = _transcribe_words(
-                        model, audio, args.language, chunker.prompt()
-                    ) if audio.size else []
-                    if final_words:
-                        print(
-                            "[final] " + _join_words([w.text for w in final_words]),
-                            flush=True,
+                    final_words: list[Word] = []
+                    if audio_samples:
+                        final_started = time.monotonic()
+                        final_words = _transcribe_words(
+                            model, audio_array(), args.language, chunker.prompt()
                         )
+                        final_ms = (time.monotonic() - final_started) * 1000.0
+                        if final_words:
+                            print(
+                                f"[final {final_ms:.0f} ms] " + _join_words([w.text for w in final_words]),
+                                flush=True,
+                            )
                     committer.finalize(final_words)
-                    audio = np.zeros((0,), dtype=np.float32)
+                    audio_clear()
                     silence_ms = 0
-                    last_decode = 0.0
+                    last_decode_started = 0.0
                     if endpoint:
                         active = False
                         pre_roll = []
@@ -470,21 +528,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--model", default="turbo", help="faster-whisper model name/path")
     p.add_argument("--device", default="cuda", choices=("cuda", "cpu"))
-    p.add_argument("--compute-type", default="int8_float16")
+    p.add_argument("--compute-type", default="float16")
     p.add_argument("--language", default="en")
     p.add_argument("--input-device", default=None, help="sounddevice input index or device name")
     p.add_argument("--sample-rate", type=int, default=16000)
     p.add_argument("--block-ms", type=int, default=20)
-    p.add_argument("--step-ms", type=int, default=320)
-    p.add_argument("--min-decode-ms", type=int, default=480)
-    p.add_argument("--endpoint-ms", type=int, default=450)
-    p.add_argument("--pre-roll-ms", type=int, default=240)
+    p.add_argument("--step-ms", type=int, default=240)
+    p.add_argument("--min-decode-ms", type=int, default=360)
+    p.add_argument("--endpoint-ms", type=int, default=320)
+    p.add_argument("--pre-roll-ms", type=int, default=160)
     p.add_argument("--speech-threshold-db", type=float, default=-43.0)
-    p.add_argument("--tail-words", type=int, default=2)
-    p.add_argument("--min-chunk-words", type=int, default=3)
-    p.add_argument("--max-chunk-words", type=int, default=7)
-    p.add_argument("--max-chunk-delay-ms", type=int, default=650)
-    p.add_argument("--max-uncommitted-seconds", type=float, default=10.0)
+    p.add_argument("--tail-words", type=int, default=1)
+    p.add_argument("--min-chunk-words", type=int, default=2)
+    p.add_argument("--max-chunk-words", type=int, default=5)
+    p.add_argument("--max-chunk-delay-ms", type=int, default=380)
+    p.add_argument("--max-uncommitted-seconds", type=float, default=6.0)
+    p.add_argument("--warmup-ms", type=int, default=700)
     p.add_argument("--voicebox-wait", type=float, default=90.0)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--list-devices", action="store_true")
