@@ -63,8 +63,8 @@ git -C $App submodule sync --recursive
 git -C $App submodule update --init --recursive
 if ($LASTEXITCODE -ne 0) { throw 'GGML submodule setup failed.' }
 
-$VoiceboxSource = Join-Path $Overlay 'fast_tts_voicebox.cpp'
-if (-not (Test-Path $VoiceboxSource)) { throw "Missing Fast TTS source: $VoiceboxSource" }
+$VoiceboxSource = Join-Path $Overlay 'fast_tts_voicebox_hardened.cpp'
+if (-not (Test-Path $VoiceboxSource)) { throw "Missing hardened Fast TTS source: $VoiceboxSource" }
 Copy-Item $VoiceboxSource (Join-Path $App 'tools\fast-tts-voicebox.cpp') -Force
 
 $CMake = Join-Path $App 'CMakeLists.txt'
@@ -91,6 +91,7 @@ Backend commit: $PinnedCommit
 Model target: qwen-talker-1.7b-base-Q8_0.gguf
 Codec target: qwen-tokenizer-12hz-Q8_0.gguf
 Streaming: qwentts.cpp native stateful frame streaming
+Frontend: hardened Win32 VoiceBox
 Generated: $(Get-Date -Format o)
 "@
 Set-Content -Path (Join-Path $App 'FAST_TTS_INTEGRATED_SOURCE.txt') -Value $Stamp -Encoding UTF8
