@@ -7,7 +7,9 @@ on:
       - 'SETUP_AND_BUILD.ps1'
       - 'RUN_VOICEBOX.ps1'
       - 'PREPARE_MODELS.ps1'
+      - 'README.md'
       - 'voicebox_17/**'
+      - 'voicebox_overlay/**'
       - '.github/workflows/validate-windows.yml'
   workflow_dispatch:
 
@@ -25,6 +27,34 @@ jobs:
     steps:
       - name: Checkout Fast TTS
         uses: actions/checkout@v4
+
+      - name: Verify hardening invariants
+        shell: pwsh
+        run: |
+          if (Test-Path '.\voicebox_overlay') {
+            throw 'Legacy voicebox_overlay must not exist in the active repository.'
+          }
+
+          $sourcePath = '.\voicebox_17\fast_tts_voicebox_hardened.cpp'
+          if (-not (Test-Path $sourcePath)) { throw 'Hardened VoiceBox source is missing.' }
+          $source = Get-Content $sourcePath -Raw
+
+          $required = @(
+            'CALLBACK_NULL',
+            'valid_voice_id',
+            'class JsonReader',
+            'OUTPUT_SAMPLE_RATE = 24000',
+            'p.cancel = &Engine::cancel_cb',
+            'Voice switch failed; previous voice remains active.'
+          )
+          foreach ($needle in $required) {
+            if (-not $source.Contains($needle)) { throw "Missing hardening invariant: $needle" }
+          }
+
+          $readme = Get-Content '.\README.md' -Raw
+          if ($readme -match 'C:\\Users\\lukel') {
+            throw 'README contains a machine-specific username path.'
+          }
 
       - name: Build native VoiceBox against pinned qwentts.cpp
         shell: pwsh
